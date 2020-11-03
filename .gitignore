@@ -1,1 +1,8 @@
 .DS_Store
+*.cpp
+*.h
+*.qrc
+darwin
+deploy
+*_amd64.go
+moc.go
