@@ -1,11 +1,38 @@
 package main
 
 import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io/ioutil"
+	"net"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 
+	"golang.org/x/text/encoding/unicode"
+
+	"github.com/gologme/log"
+	gsyslog "github.com/hashicorp/go-syslog"
+	"github.com/hjson/hjson-go"
+	"github.com/kardianos/minwinsvc"
+	"github.com/mitchellh/mapstructure"
 	"github.com/therecipe/qt/core"
 	"github.com/therecipe/qt/gui"
 	"github.com/therecipe/qt/widgets"
+
+	"github.com/yggdrasil-network/yggdrasil-go/src/address"
+	"github.com/yggdrasil-network/yggdrasil-go/src/admin"
+	"github.com/yggdrasil-network/yggdrasil-go/src/config"
+	"github.com/yggdrasil-network/yggdrasil-go/src/crypto"
+	"github.com/yggdrasil-network/yggdrasil-go/src/module"
+	"github.com/yggdrasil-network/yggdrasil-go/src/multicast"
+	"github.com/yggdrasil-network/yggdrasil-go/src/tuntap"
+	"github.com/yggdrasil-network/yggdrasil-go/src/version"
+	"github.com/yggdrasil-network/yggdrasil-go/src/yggdrasil"
 )
 
 type QSystemTrayIconWithCustomSlot struct {
@@ -15,75 +42,6 @@ type QSystemTrayIconWithCustomSlot struct {
 }
 
 func (tray *QSystemTrayIconWithCustomSlot) triggerSlot(f func()) { f() } //the slot just needs to call the passed function to execute it inside the main thread
-
-func main() {
-	app := widgets.NewQApplication(len(os.Args), os.Args)
-
-	window := widgets.NewQMainWindow(nil, 0)
-
-	window.SetMinimumSize2(350, 100)
-	window.SetWindowTitle("ThreeFold network connector")
-
-	widget := widgets.NewQWidget(nil, 0)
-	widget.SetLayout(widgets.NewQVBoxLayout())
-	window.SetCentralWidget(widget)
-
-	systray := NewQSystemTrayIconWithCustomSlot(nil)
-	systray.SetIcon(gui.NewQIcon5(":/qml/icon.ico"))
-
-	systrayMenu := widgets.NewQMenu(nil)
-
-	settingsMenuAction := systrayMenu.AddAction("Settings")
-	settingsMenuAction.ConnectTriggered(func(bool) {
-		println("Showing window ...")
-		window.Show()
-	})
-
-	quitMenuAction := systrayMenu.AddAction("Quit")
-	quitMenuAction.ConnectTriggered(func(bool) {
-		println("Exiting application ... ")
-		app.Exit(0)
-	})
-
-	systray.SetContextMenu(systrayMenu)
-	systray.Show()
-
-	groupBox := widgets.NewQGroupBox2("Settings", nil)
-
-	// println(window.Type())
-	gridLayout := widgets.NewQGridLayout2()
-
-	statusLabel := widgets.NewQLabel2("Connection status: ", nil, 0)
-	connectionLabel := widgets.NewQLabel2("Disconnected", nil, 0)
-	connectionLabel.SetStyleSheet("QLabel {color: red;}")
-
-	connectButton := widgets.NewQPushButton2("Connect", nil)
-	connectButton.ConnectClicked(func(bool) {
-		widgets.QMessageBox_Information(nil, "OK", "Connecting ...", widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
-	})
-
-	gridLayout.AddWidget2(statusLabel, 0, 0, core.Qt__AlignLeft)
-	gridLayout.AddWidget2(connectionLabel, 0, 1, core.Qt__AlignCenter)
-	gridLayout.AddWidget2(connectButton, 0, 2, core.Qt__AlignRight)
-
-	groupBox.SetLayout(gridLayout)
-	widget.Layout().AddWidget(groupBox)
-
-	window.ConnectCloseEvent(func(event *gui.QCloseEvent) {
-		widgets.QMessageBox_Information(nil, "ThreeFold network connector", "The ThreeFold network connector will be minimized.", widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
-		window.Hide()
-		event.Ignore()
-	})
-
-	window.Show()
-	app.Exec()
-}
-
-/*
-
-
-
-
 
 type node struct {
 	core      yggdrasil.Core
@@ -211,12 +169,93 @@ func setLogLevel(loglevel string, logger *log.Logger) {
 	}
 }
 
-// The main function is responsible for configuring and starting Yggdrasil.
-func init_yggdrasil() {
-	// Configure the command line parameters.
+func userInterface() {
+	app := widgets.NewQApplication(len(os.Args), os.Args)
+
+	window := widgets.NewQMainWindow(nil, 0)
+
+	window.SetMinimumSize2(350, 100)
+	window.SetWindowTitle("ThreeFold network connector")
+
+	widget := widgets.NewQWidget(nil, 0)
+	widget.SetLayout(widgets.NewQVBoxLayout())
+	window.SetCentralWidget(widget)
+
+	systray := NewQSystemTrayIconWithCustomSlot(nil)
+	systray.SetIcon(gui.NewQIcon5(":/qml/icon.ico"))
+
+	systrayMenu := widgets.NewQMenu(nil)
+
+	settingsMenuAction := systrayMenu.AddAction("Settings")
+	settingsMenuAction.ConnectTriggered(func(bool) {
+		println("Showing window ...")
+		window.Show()
+	})
+
+	yggdrasilVersionMenuAction := systrayMenu.AddAction("Yggdrasil version")
+	yggdrasilVersionMenuAction.ConnectTriggered(func(bool) {
+		widgets.QMessageBox_Information(nil, "ThreeFold network connector", "Ygdrassil version: "+version.BuildName(), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+	})
+
+	quitMenuAction := systrayMenu.AddAction("Quit")
+	quitMenuAction.ConnectTriggered(func(bool) {
+		println("Exiting application ... ")
+		app.Exit(0)
+	})
+
+	systray.SetContextMenu(systrayMenu)
+	systray.Show()
+
+	connectionState := false
+	groupBox := widgets.NewQGroupBox2("Settings", nil)
+
+	// println(window.Type())
+	gridLayout := widgets.NewQGridLayout2()
+
+	statusLabel := widgets.NewQLabel2("Connection status: ", nil, 0)
+	connectionLabel := widgets.NewQLabel2("Disconnected", nil, 0)
+	connectionLabel.SetStyleSheet("QLabel {color: red;}")
+
+	connectButton := widgets.NewQPushButton2("Connect", nil)
+	connectButton.ConnectClicked(func(bool) {
+		if !connectionState {
+			go submain()
+
+			connectionLabel.SetText("Connected")
+			connectionLabel.SetStyleSheet("QLabel {color: green;}")
+			connectButton.SetText("Disconnect")
+			connectionState = true
+			return
+		}
+
+		connectionLabel.SetText("Disconnected")
+		connectionLabel.SetStyleSheet("QLabel {color: red;}")
+		connectButton.SetText("Connect")
+		connectionState = false
+		// widgets.QMessageBox_Information(nil, "OK", "Connecting ...", widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+	})
+
+	gridLayout.AddWidget2(statusLabel, 0, 0, core.Qt__AlignLeft)
+	gridLayout.AddWidget2(connectionLabel, 0, 1, core.Qt__AlignCenter)
+	gridLayout.AddWidget2(connectButton, 0, 2, core.Qt__AlignRight)
+
+	groupBox.SetLayout(gridLayout)
+	widget.Layout().AddWidget(groupBox)
+
+	window.ConnectCloseEvent(func(event *gui.QCloseEvent) {
+		widgets.QMessageBox_Information(nil, "ThreeFold network connector", "The ThreeFold network connector will be minimized.", widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+		window.Hide()
+		event.Ignore()
+	})
+
+	window.Show()
+	app.Exec()
+}
+
+func submain() {
 	genconf := flag.Bool("genconf", false, "print a new config to stdout")
 	useconf := flag.Bool("useconf", false, "read HJSON/JSON config from stdin")
-	useconffile := flag.String("useconffile", "", "read HJSON/JSON config from specified file path")
+	useconffile := flag.String("useconffile", "./config/config.yml", "read HJSON/JSON config from specified file path")
 	normaliseconf := flag.Bool("normaliseconf", false, "use in combination with either -useconf or -useconffile, outputs your configuration normalised")
 	confjson := flag.Bool("json", false, "print configuration from -genconf or -normaliseconf as JSON instead of HJSON")
 	autoconf := flag.Bool("autoconf", false, "automatic mode (dynamic IP, peer with IPv6 neighbors)")
@@ -229,6 +268,34 @@ func init_yggdrasil() {
 
 	var cfg *config.NodeConfig
 	var err error
+
+	// cfg = config.GenerateConfig()
+	// fmt.Println(cfg)
+
+	// configFile := doGenconf(*confjson)
+
+	// f, err := os.Create("config.yml")
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	return
+	// }
+	// l, err := f.WriteString(configFile)
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	f.Close()
+	// 	return
+	// }
+	// fmt.Println(l, "bytes written successfully")
+	// err = f.Close()
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	return
+	// }
+
+	// Automaticly generate a config file if it doesnt already exist.
+	// Automaticly connect on startup?
+	// Call different functions to change the actions.
+
 	switch {
 	case *ver:
 		fmt.Println("Build name:", version.BuildName())
@@ -369,6 +436,7 @@ func init_yggdrasil() {
 	subnet := n.core.Subnet()
 	logger.Infof("Your IPv6 address is %s", address.String())
 	logger.Infof("Your IPv6 subnet is %s", subnet.String())
+
 	// Catch interrupts from the operating system to exit gracefully.
 	c := make(chan os.Signal, 1)
 	r := make(chan os.Signal, 1)
@@ -396,6 +464,11 @@ func init_yggdrasil() {
 		}
 	}
 exit:
+}
+
+// The main function is responsible for configuring and starting Yggdrasil.
+func main() {
+	userInterface()
 }
 
 func (n *node) shutdown() {
@@ -467,4 +540,3 @@ func (n *node) sessionFirewall(pubkey *crypto.BoxPubKey, initiator bool) bool {
 	// Finally, default-deny if not matching any of the above rules
 	return false
 }
-*/

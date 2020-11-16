@@ -6,3 +6,4 @@ darwin
 deploy
 *_amd64.go
 moc.go
+vendor
