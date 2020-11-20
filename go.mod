@@ -11,4 +11,6 @@ require (
 	github.com/therecipe/qt v0.0.0-20200904063919-c0c124a5770d
 	github.com/yggdrasil-network/yggdrasil-go v0.3.15
 	golang.org/x/text v0.3.4
+	github.com/go-ping/ping v0.0.0-20201115131931-3300c582a663
+	github.com/gocolly/colly/v2 v2.1.0
 )

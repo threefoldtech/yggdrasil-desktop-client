@@ -10,8 +10,15 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
+
+	"github.com/go-ping/ping"
+	"github.com/gocolly/colly/v2"
 
 	"golang.org/x/text/encoding/unicode"
 
@@ -35,6 +42,18 @@ import (
 	"github.com/yggdrasil-network/yggdrasil-go/src/yggdrasil"
 )
 
+var publicYggdrasilPeersURL = "https://publicpeers.neilalexander.dev/"
+var configPeers string
+
+var wg sync.WaitGroup
+
+// YggdrasilIPAddress represents an yggdrasil IP address with additional information.
+type YggdrasilIPAddress struct {
+	FullIPAddress string
+	IPAddress     string
+	latency       float64
+}
+
 type QSystemTrayIconWithCustomSlot struct {
 	widgets.QSystemTrayIcon
 
@@ -49,6 +68,67 @@ type node struct {
 	tuntap    module.Module // tuntap.TunAdapter
 	multicast module.Module // multicast.Multicast
 	admin     module.Module // admin.AdminSocket
+}
+
+func getConfigPeers() string {
+	c := colly.NewCollector()
+	var ipAddresses []YggdrasilIPAddress
+
+	c.OnHTML(".statusup #address", func(e *colly.HTMLElement) {
+		result := strings.ReplaceAll(e.Text, "tls://", "")
+		result = strings.ReplaceAll(result, "tcp://", "")
+		result = strings.ReplaceAll(result, "[", "")
+		result = strings.ReplaceAll(result, "]", "")
+		splitResult := strings.Split(result, ":")
+		finalResult := strings.ReplaceAll(result, ":"+splitResult[len(splitResult)-1], "")
+
+		ipAddr := YggdrasilIPAddress{
+			FullIPAddress: e.Text,
+			IPAddress:     finalResult,
+			latency:       9999,
+		}
+
+		ipAddresses = append(ipAddresses, ipAddr)
+	})
+
+	c.Visit(publicYggdrasilPeersURL)
+
+	for index := 0; index < len(ipAddresses); index++ {
+		wg.Add(1)
+		go pingAddress(&ipAddresses[index])
+	}
+
+	wg.Wait()
+
+	sort.Slice(ipAddresses, func(i, j int) bool {
+		return ipAddresses[i].latency < ipAddresses[j].latency
+	})
+
+	return fmt.Sprintf("Peers: [\"%s\", \"%s\", \"%s\"]", ipAddresses[0].FullIPAddress, ipAddresses[1].FullIPAddress, ipAddresses[2].FullIPAddress)
+}
+
+func pingAddress(addr *YggdrasilIPAddress) {
+	pinger, err := ping.NewPinger(addr.IPAddress)
+	pinger.Timeout = time.Second / 2
+
+	if err != nil {
+		panic(err)
+	}
+	pinger.Count = 6
+	err = pinger.Run() // Blocks until finished.
+	if err != nil {
+		panic(err)
+	}
+	stats := pinger.Statistics() // get send/receive/rtt stats
+
+	if stats.AvgRtt.String() == "0s" {
+		addr.latency = 9999
+		defer wg.Done()
+		return
+	}
+
+	addr.latency, _ = strconv.ParseFloat(strings.ReplaceAll(stats.AvgRtt.String(), "ms", ""), 64)
+	defer wg.Done()
 }
 
 func readConfig(useconf *bool, useconffile *string, normaliseconf *bool) *config.NodeConfig {
@@ -252,12 +332,55 @@ func userInterface() {
 	app.Exec()
 }
 
+func fileExists(filename string) bool {
+	info, err := os.Stat(filename)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return !info.IsDir()
+}
+
 func submain() {
+	confjson := flag.Bool("json", false, "print configuration from -genconf or -normaliseconf as JSON instead of HJSON")
+
+	var cfg *config.NodeConfig
+	var err error
+
+	if !fileExists("./config/config.yml") {
+		fmt.Println("Config file doesnt exist ...")
+		cfg = config.GenerateConfig()
+		fmt.Println(cfg)
+
+		configFile := doGenconf(*confjson)
+		fmt.Println("Config file created")
+		//configFile = strings.ReplaceAll(configFile, "Peers: []", getConfigPeers())
+
+		fmt.Println(configPeers)
+		fmt.Println("Peers replaced")
+
+		f, err := os.Create("./config/config.yml")
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		l, err := f.WriteString(configFile)
+		if err != nil {
+			fmt.Println(err)
+			f.Close()
+			return
+		}
+		fmt.Println(l, "bytes written successfully")
+		err = f.Close()
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+	}
+
 	genconf := flag.Bool("genconf", false, "print a new config to stdout")
 	useconf := flag.Bool("useconf", false, "read HJSON/JSON config from stdin")
 	useconffile := flag.String("useconffile", "./config/config.yml", "read HJSON/JSON config from specified file path")
 	normaliseconf := flag.Bool("normaliseconf", false, "use in combination with either -useconf or -useconffile, outputs your configuration normalised")
-	confjson := flag.Bool("json", false, "print configuration from -genconf or -normaliseconf as JSON instead of HJSON")
 	autoconf := flag.Bool("autoconf", false, "automatic mode (dynamic IP, peer with IPv6 neighbors)")
 	ver := flag.Bool("version", false, "prints the version of this build")
 	logto := flag.String("logto", "stdout", "file path to log to, \"syslog\" or \"stdout\"")
@@ -265,32 +388,6 @@ func submain() {
 	getsnet := flag.Bool("subnet", false, "returns the IPv6 subnet as derived from the supplied configuration")
 	loglevel := flag.String("loglevel", "info", "loglevel to enable")
 	flag.Parse()
-
-	var cfg *config.NodeConfig
-	var err error
-
-	// cfg = config.GenerateConfig()
-	// fmt.Println(cfg)
-
-	// configFile := doGenconf(*confjson)
-
-	// f, err := os.Create("config.yml")
-	// if err != nil {
-	// 	fmt.Println(err)
-	// 	return
-	// }
-	// l, err := f.WriteString(configFile)
-	// if err != nil {
-	// 	fmt.Println(err)
-	// 	f.Close()
-	// 	return
-	// }
-	// fmt.Println(l, "bytes written successfully")
-	// err = f.Close()
-	// if err != nil {
-	// 	fmt.Println(err)
-	// 	return
-	// }
 
 	// Automaticly generate a config file if it doesnt already exist.
 	// Automaticly connect on startup?
@@ -468,6 +565,8 @@ exit:
 
 // The main function is responsible for configuring and starting Yggdrasil.
 func main() {
+	configPeers = getConfigPeers()
+
 	userInterface()
 }
 
