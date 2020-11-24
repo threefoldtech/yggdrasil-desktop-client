@@ -20,13 +20,14 @@ import (
 
 	"github.com/go-ping/ping"
 	"github.com/gocolly/colly/v2"
+	"github.com/kardianos/minwinsvc"
 
+	"github.com/atotto/clipboard"
 	"golang.org/x/text/encoding/unicode"
 
 	"github.com/gologme/log"
 	gsyslog "github.com/hashicorp/go-syslog"
 	"github.com/hjson/hjson-go"
-	"github.com/kardianos/minwinsvc"
 	"github.com/mitchellh/mapstructure"
 	"github.com/therecipe/qt/core"
 	"github.com/therecipe/qt/gui"
@@ -49,6 +50,19 @@ var IPAddress net.IP
 var IPSubnet net.IPNet
 var ipLabel *widgets.QLabel
 var subnetLabel *widgets.QLabel
+var debugLabel *widgets.QLabel
+var n node
+var confjson *bool
+var genconf *bool
+var useconf *bool
+var useconffile *string
+var normaliseconf *bool
+var autoconf *bool
+var ver *bool
+var logto *string
+var getaddr *bool
+var getsnet *bool
+var loglevel *string
 
 var wg sync.WaitGroup
 
@@ -89,8 +103,8 @@ func checkRoot() bool {
 	var password = ""
 	var widget = widgets.NewQWidget(nil, 0)
 	var dialog = widgets.NewQInputDialog(widget, core.Qt__Dialog)
-	dialog.SetWindowTitle("Threefold network connector")
-	dialog.SetLabelText("Please enter your password")
+	dialog.SetWindowTitle("Threefold Network Connector")
+	dialog.SetLabelText("ThreeFold Network Connector would like to automatically\nset up your connection to the ThreeFold Network.\n\nTo do this,  please provide the password for \"" + getUsername() + "\"")
 	dialog.SetTextEchoMode(widgets.QLineEdit__Password)
 	dialog.SetInputMethodHints(core.Qt__ImhNone)
 
@@ -109,6 +123,16 @@ func checkRoot() bool {
 
 func elevateMyself(password string) string {
 	cmd := "echo " + password + " | sudo -S /Users/mathiasdeweerdt/Documents/jimber/yggdrasil_desktop_client/go/deploy/darwin/go.app/Contents/MacOS/go"
+	stdout, err := exec.Command("bash", "-c", cmd).Output()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	return strings.TrimSpace(string(stdout))
+}
+
+func getUsername() string {
+	cmd := "id -F"
 	stdout, err := exec.Command("bash", "-c", cmd).Output()
 	if err != nil {
 		fmt.Println(err)
@@ -319,7 +343,7 @@ func userInterface() {
 
 	window := widgets.NewQMainWindow(nil, 0)
 
-	window.SetMinimumSize2(550, 125)
+	window.SetMinimumSize2(600, 140)
 	window.SetWindowTitle("ThreeFold network connector")
 
 	widget := widgets.NewQWidget(nil, 0)
@@ -362,12 +386,25 @@ func userInterface() {
 	connectionLabel.SetStyleSheet("QLabel {color: red;}")
 
 	connectButton := widgets.NewQPushButton2("Connect", nil)
+
+	CopyIPButton := widgets.NewQPushButton2("Copy Ipv6", nil)
+	copySubnetButton := widgets.NewQPushButton2("Copy Subnet", nil)
+
+	CopyIPButton.ConnectClicked(func(bool) {
+		clipboard.WriteAll(IPAddress.String())
+	})
+
+	copySubnetButton.ConnectClicked(func(bool) {
+		clipboard.WriteAll(IPSubnet.String())
+	})
+
 	connectButton.ConnectClicked(func(bool) {
 		if !connectionState {
 			go submain()
 
 			ipLabel.SetText("...")
 			subnetLabel.SetText("...")
+			debugLabel.SetText("[info]: 5")
 
 			connectionLabel.SetText("Connected")
 			connectionLabel.SetStyleSheet("QLabel {color: green;}")
@@ -380,7 +417,23 @@ func userInterface() {
 		connectionLabel.SetStyleSheet("QLabel {color: red;}")
 		connectButton.SetText("Connect")
 		connectionState = false
+		// defer n.shutdown()
+		// go submain()
 		// widgets.QMessageBox_Information(nil, "OK", "Connecting ...", widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+
+		ipLabel.SetText("N/A")
+		subnetLabel.SetText("N/A")
+
+		// Catch interrupts from the operating system to exit gracefully.
+		c := make(chan os.Signal, 1)
+		r := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+		signal.Notify(r, os.Interrupt, syscall.SIGHUP)
+		// Capture the service being stopped on Windows.
+		minwinsvc.SetOnExit(n.shutdown)
+		defer n.shutdown()
+		// Wait for the terminate/interrupt signal. Once a signal is received, the
+		// deferred Stop function above will run which will shut down TUN/TAP.
 	})
 
 	gridLayout.AddWidget2(statusLabel, 0, 0, core.Qt__AlignLeft)
@@ -389,15 +442,24 @@ func userInterface() {
 
 	ipLabelInfo := widgets.NewQLabel2("Ipv6: ", nil, 0)
 	subnetLabelInfo := widgets.NewQLabel2("Subnet: ", nil, 0)
+	// debugLabelInfo := widgets.NewQLabel2("Debug: ", nil, 0)
 
-	ipLabel = widgets.NewQLabel2(IPAddress.String(), nil, 0)
-	subnetLabel = widgets.NewQLabel2(IPSubnet.String(), nil, 0)
+	ipLabel = widgets.NewQLabel2("N/A", nil, 0)
+	subnetLabel = widgets.NewQLabel2("N/A", nil, 0)
+	debugLabel = widgets.NewQLabel2("Debug info", nil, 0)
 
-	gridLayout.AddWidget2(ipLabelInfo, 1, 0, core.Qt__AlignLeft)
-	gridLayout.AddWidget2(ipLabel, 1, 1, core.Qt__AlignCenter)
+	gridLayout.AddWidget2(ipLabelInfo, 2, 0, core.Qt__AlignLeft)
+	gridLayout.AddWidget2(ipLabel, 2, 1, core.Qt__AlignCenter)
+	gridLayout.AddWidget2(CopyIPButton, 2, 2, core.Qt__AlignRight)
 
-	gridLayout.AddWidget2(subnetLabelInfo, 2, 0, core.Qt__AlignLeft)
-	gridLayout.AddWidget2(subnetLabel, 2, 1, core.Qt__AlignCenter)
+	gridLayout.AddWidget2(subnetLabelInfo, 3, 0, core.Qt__AlignLeft)
+	gridLayout.AddWidget2(subnetLabel, 3, 1, core.Qt__AlignCenter)
+	gridLayout.AddWidget2(copySubnetButton, 3, 2, core.Qt__AlignRight)
+
+	// Debugging purposes
+
+	// gridLayout.AddWidget2(debugLabelInfo, 3, 0, core.Qt__AlignCenter)
+	// gridLayout.AddWidget2(debugLabel, 3, 1, core.Qt__AlignCenter)
 
 	groupBox.SetLayout(gridLayout)
 	widget.Layout().AddWidget(groupBox)
@@ -421,32 +483,45 @@ func fileExists(filename string) bool {
 }
 
 func submain() {
-	confjson := flag.Bool("json", false, "print configuration from -genconf or -normaliseconf as JSON instead of HJSON")
+	if confjson == nil {
+		confjson = flag.Bool("json", false, "print configuration from -genconf or -normaliseconf as JSON instead of HJSON")
+	}
 
 	var cfg *config.NodeConfig
 	var err error
 
-	if !fileExists("config.yml") {
+	debugLabel.SetText("[info]: submain")
+	fmt.Println("initt")
+
+	if !fileExists("/etc/yggdrasil.conf") {
+		debugLabel.SetText("[info]: No config file")
 		fmt.Println("Config file doesnt exist ...")
 		cfg = config.GenerateConfig()
 		fmt.Println(cfg)
 
+		debugLabel.SetText("[info]: config generated")
+
 		configFile := doGenconf(*confjson)
 		fmt.Println("Config file created")
+		debugLabel.SetText("[info]: Created config file")
 		configFile = strings.ReplaceAll(configFile, "Peers: []", configPeers)
 		fmt.Println("Peers replaced")
+		debugLabel.SetText("[info]: Peers replaced")
 
-		f, err := os.Create("config.yml")
+		f, err := os.Create("/etc/yggdrasil.conf")
 		if err != nil {
 			fmt.Println(err)
+			debugLabel.SetText("[err01]: " + err.Error())
 			return
 		}
 		l, err := f.WriteString(configFile)
 		if err != nil {
 			fmt.Println(err)
+			debugLabel.SetText("[err02]: " + err.Error())
 			f.Close()
 			return
 		}
+		debugLabel.SetText("[info]: Config written")
 		fmt.Println(l, "bytes written successfully")
 		err = f.Close()
 		if err != nil {
@@ -454,17 +529,36 @@ func submain() {
 			return
 		}
 	}
-
-	genconf := flag.Bool("genconf", false, "print a new config to stdout")
-	useconf := flag.Bool("useconf", false, "read HJSON/JSON config from stdin")
-	useconffile := flag.String("useconffile", "./config.yml", "read HJSON/JSON config from specified file path")
-	normaliseconf := flag.Bool("normaliseconf", false, "use in combination with either -useconf or -useconffile, outputs your configuration normalised")
-	autoconf := flag.Bool("autoconf", false, "automatic mode (dynamic IP, peer with IPv6 neighbors)")
-	ver := flag.Bool("version", false, "prints the version of this build")
-	logto := flag.String("logto", "stdout", "file path to log to, \"syslog\" or \"stdout\"")
-	getaddr := flag.Bool("address", false, "returns the IPv6 address as derived from the supplied configuration")
-	getsnet := flag.Bool("subnet", false, "returns the IPv6 subnet as derived from the supplied configuration")
-	loglevel := flag.String("loglevel", "info", "loglevel to enable")
+	if genconf == nil {
+		genconf = flag.Bool("genconf", false, "print a new config to stdout")
+	}
+	if useconf == nil {
+		useconf = flag.Bool("useconf", false, "read HJSON/JSON config from stdin")
+	}
+	if useconffile == nil {
+		useconffile = flag.String("useconffile", "/etc/yggdrasil.conf", "read HJSON/JSON config from specified file path")
+	}
+	if normaliseconf == nil {
+		normaliseconf = flag.Bool("normaliseconf", false, "use in combination with either -useconf or -useconffile, outputs your configuration normalised")
+	}
+	if autoconf == nil {
+		autoconf = flag.Bool("autoconf", false, "automatic mode (dynamic IP, peer with IPv6 neighbors)")
+	}
+	if ver == nil {
+		ver = flag.Bool("version", false, "prints the version of this build")
+	}
+	if logto == nil {
+		logto = flag.String("logto", "stdout", "file path to log to, \"syslog\" or \"stdout\"")
+	}
+	if getaddr == nil {
+		getaddr = flag.Bool("address", false, "returns the IPv6 address as derived from the supplied configuration")
+	}
+	if getsnet == nil {
+		getsnet = flag.Bool("subnet", false, "returns the IPv6 subnet as derived from the supplied configuration")
+	}
+	if loglevel == nil {
+		loglevel = flag.String("loglevel", "info", "loglevel to enable")
+	}
 	flag.Parse()
 
 	// Automaticly generate a config file if it doesnt already exist.
@@ -507,6 +601,8 @@ func submain() {
 		// No flags were provided, therefore print the list of flags to stdout.
 		flag.PrintDefaults()
 	}
+
+	debugLabel.SetText("[info]: 1")
 	// Have we got a working configuration? If we don't then it probably means
 	// that neither -autoconf, -useconf or -useconffile were set above. Stop
 	// if we don't.
@@ -522,6 +618,8 @@ func submain() {
 		}
 		return nil
 	}
+	debugLabel.SetText("[info]: 2")
+
 	switch {
 	case *getaddr:
 		if nodeid := getNodeID(); nodeid != nil {
@@ -542,6 +640,8 @@ func submain() {
 		return
 	default:
 	}
+
+	debugLabel.SetText("[info]: 3")
 	// Create a new logger that logs output to stdout.
 	var logger *log.Logger
 	switch *logto {
@@ -565,7 +665,7 @@ func submain() {
 
 	// Setup the Yggdrasil node itself. The node{} type includes a Core, so we
 	// don't need to create this manually.
-	n := node{}
+	n = node{}
 	// Now start Yggdrasil - this starts the DHT, router, switch and other core
 	// components needed for Yggdrasil to operate
 	n.state, err = n.core.Start(cfg, logger)
@@ -614,34 +714,35 @@ func submain() {
 
 	ipLabel.SetText(IPAddress.String())
 	subnetLabel.SetText(IPSubnet.String())
+	debugLabel.SetText("[info]: Ip has been set")
 
-	// Catch interrupts from the operating system to exit gracefully.
-	c := make(chan os.Signal, 1)
-	r := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	signal.Notify(r, os.Interrupt, syscall.SIGHUP)
-	// Capture the service being stopped on Windows.
-	minwinsvc.SetOnExit(n.shutdown)
-	defer n.shutdown()
-	// Wait for the terminate/interrupt signal. Once a signal is received, the
-	// deferred Stop function above will run which will shut down TUN/TAP.
-	for {
-		select {
-		case <-c:
-			goto exit
-		case <-r:
-			if *useconffile != "" {
-				cfg = readConfig(useconf, useconffile, normaliseconf)
-				logger.Infoln("Reloading configuration from", *useconffile)
-				n.core.UpdateConfig(cfg)
-				n.tuntap.UpdateConfig(cfg)
-				n.multicast.UpdateConfig(cfg)
-			} else {
-				logger.Errorln("Reloading config at runtime is only possible with -useconffile")
-			}
-		}
-	}
-exit:
+	// 	// Catch interrupts from the operating system to exit gracefully.
+	// 	c := make(chan os.Signal, 1)
+	// 	r := make(chan os.Signal, 1)
+	// 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	// 	signal.Notify(r, os.Interrupt, syscall.SIGHUP)
+	// 	// Capture the service being stopped on Windows.
+	// 	minwinsvc.SetOnExit(n.shutdown)
+	// 	defer n.shutdown()
+	// 	// Wait for the terminate/interrupt signal. Once a signal is received, the
+	// 	// deferred Stop function above will run which will shut down TUN/TAP.
+	// 	for {
+	// 		select {
+	// 		case <-c:
+	// 			goto exit
+	// 		case <-r:
+	// 			if *useconffile != "" {
+	// 				cfg = readConfig(useconf, useconffile, normaliseconf)
+	// 				logger.Infoln("Reloading configuration from", *useconffile)
+	// 				n.core.UpdateConfig(cfg)
+	// 				n.tuntap.UpdateConfig(cfg)
+	// 				n.multicast.UpdateConfig(cfg)
+	// 			} else {
+	// 				logger.Errorln("Reloading config at runtime is only possible with -useconffile")
+	// 			}
+	// 		}
+	// 	}
+	// exit:
 }
 
 // The main function is responsible for configuring and starting Yggdrasil.
