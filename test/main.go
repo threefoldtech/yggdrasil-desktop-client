@@ -48,7 +48,7 @@ func getPeers() string {
 
 	for index := 0; index < len(ipAddresses); index++ {
 		wg.Add(1)
-		go pingAddress(&ipAddresses[index])
+		go pingAddress(ipAddresses[index])
 	}
 
 	wg.Wait()
@@ -64,19 +64,24 @@ func main() {
 	fmt.Println(getPeers())
 }
 
-func pingAddress(addr *YggdrasilIPAddress) {
+func pingAddress(addr YggdrasilIPAddress) {
 	pinger, err := ping.NewPinger(addr.IPAddress)
 	pinger.Timeout = time.Second / 2
 
+	fmt.Println("Attempting to ping: ", addr.IPAddress)
 	if err != nil {
 		panic(err)
 	}
-	pinger.Count = 6
+	pinger.Count = 2
 	err = pinger.Run() // Blocks until finished.
+
 	if err != nil {
+		fmt.Println("Failed to ping: ", addr.IPAddress, err)
 		panic(err)
 	}
 	stats := pinger.Statistics() // get send/receive/rtt stats
+
+	fmt.Println("Pinged: ", addr.IPAddress, stats.AvgRtt)
 
 	if stats.AvgRtt.String() == "0s" {
 		addr.latency = 9999

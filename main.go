@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sort"
 	"strconv"
@@ -44,6 +45,10 @@ import (
 
 var publicYggdrasilPeersURL = "https://publicpeers.neilalexander.dev/"
 var configPeers string
+var IPAddress net.IP
+var IPSubnet net.IPNet
+var ipLabel *widgets.QLabel
+var subnetLabel *widgets.QLabel
 
 var wg sync.WaitGroup
 
@@ -70,54 +75,114 @@ type node struct {
 	admin     module.Module // admin.AdminSocket
 }
 
-func getConfigPeers() string {
-	c := colly.NewCollector()
-	var ipAddresses []YggdrasilIPAddress
-
-	c.OnHTML(".statusup #address", func(e *colly.HTMLElement) {
-		result := strings.ReplaceAll(e.Text, "tls://", "")
-		result = strings.ReplaceAll(result, "tcp://", "")
-		result = strings.ReplaceAll(result, "[", "")
-		result = strings.ReplaceAll(result, "]", "")
-		splitResult := strings.Split(result, ":")
-		finalResult := strings.ReplaceAll(result, ":"+splitResult[len(splitResult)-1], "")
-
-		ipAddr := YggdrasilIPAddress{
-			FullIPAddress: e.Text,
-			IPAddress:     finalResult,
-			latency:       9999,
-		}
-
-		ipAddresses = append(ipAddresses, ipAddr)
-	})
-
-	c.Visit(publicYggdrasilPeersURL)
-
-	for index := 0; index < len(ipAddresses); index++ {
-		wg.Add(1)
-		go pingAddress(&ipAddresses[index])
+func checkRoot() bool {
+	if getProcessOwner() == "root" {
+		fmt.Println("You're sudo!")
+		return true
 	}
 
-	wg.Wait()
+	fmt.Println("Not running with sudo, trying to elevate!")
 
-	sort.Slice(ipAddresses, func(i, j int) bool {
-		return ipAddresses[i].latency < ipAddresses[j].latency
+	fmt.Println("Asking user for password")
+
+	widgets.NewQApplication(len(os.Args), os.Args)
+	var password = ""
+	var widget = widgets.NewQWidget(nil, 0)
+	var dialog = widgets.NewQInputDialog(widget, core.Qt__Dialog)
+	dialog.SetWindowTitle("Threefold network connector")
+	dialog.SetLabelText("Please enter your password")
+	dialog.SetTextEchoMode(widgets.QLineEdit__Password)
+	dialog.SetInputMethodHints(core.Qt__ImhNone)
+
+	dialog.ConnectAccept(func() {
+		password = dialog.TextValue()
+		dialog.Close()
 	})
 
-	return fmt.Sprintf("Peers: [\"%s\", \"%s\", \"%s\"]", ipAddresses[0].FullIPAddress, ipAddresses[1].FullIPAddress, ipAddresses[2].FullIPAddress)
+	dialog.Exec()
+
+	fmt.Println("Restarting myself as a new elevated process")
+	elevateMyself(password)
+
+	return false
 }
 
-func pingAddress(addr *YggdrasilIPAddress) {
+func elevateMyself(password string) string {
+	cmd := "echo " + password + " | sudo -S /Users/mathiasdeweerdt/Documents/jimber/yggdrasil_desktop_client/go/deploy/darwin/go.app/Contents/MacOS/go"
+	stdout, err := exec.Command("bash", "-c", cmd).Output()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	return strings.TrimSpace(string(stdout))
+}
+
+func getProcessOwner() string {
+	stdout, err := exec.Command("ps", "-o", "user=", "-p", strconv.Itoa(os.Getpid())).Output()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	return strings.TrimSpace(string(stdout))
+}
+
+// Making this function async in some magic go-syntax land.
+func getConfigPeers() <-chan string {
+	r := make(chan string)
+
+	go func() {
+		defer close(r)
+
+		c := colly.NewCollector()
+		var ipAddresses []YggdrasilIPAddress
+
+		c.OnHTML(".statusup #address", func(e *colly.HTMLElement) {
+			result := strings.ReplaceAll(e.Text, "tls://", "")
+			result = strings.ReplaceAll(result, "tcp://", "")
+			result = strings.ReplaceAll(result, "[", "")
+			result = strings.ReplaceAll(result, "]", "")
+			splitResult := strings.Split(result, ":")
+			finalResult := strings.ReplaceAll(result, ":"+splitResult[len(splitResult)-1], "")
+
+			ipAddr := YggdrasilIPAddress{
+				FullIPAddress: e.Text,
+				IPAddress:     finalResult,
+				latency:       9999,
+			}
+
+			ipAddresses = append(ipAddresses, ipAddr)
+		})
+
+		c.Visit(publicYggdrasilPeersURL)
+
+		for index := 0; index < len(ipAddresses); index++ {
+			wg.Add(1)
+			go pingAddress(ipAddresses[index])
+		}
+
+		wg.Wait()
+
+		sort.Slice(ipAddresses, func(i, j int) bool {
+			return ipAddresses[i].latency < ipAddresses[j].latency
+		})
+
+		r <- fmt.Sprintf("Peers: [\"%s\", \"%s\", \"%s\"]", ipAddresses[0].FullIPAddress, ipAddresses[1].FullIPAddress, ipAddresses[2].FullIPAddress)
+	}()
+
+	return r
+}
+
+func pingAddress(addr YggdrasilIPAddress) {
 	pinger, err := ping.NewPinger(addr.IPAddress)
 	pinger.Timeout = time.Second / 2
 
 	if err != nil {
 		panic(err)
 	}
-	pinger.Count = 6
+	pinger.Count = 2
 	err = pinger.Run() // Blocks until finished.
 	if err != nil {
-		panic(err)
+		// panic(err)
 	}
 	stats := pinger.Statistics() // get send/receive/rtt stats
 
@@ -254,7 +319,7 @@ func userInterface() {
 
 	window := widgets.NewQMainWindow(nil, 0)
 
-	window.SetMinimumSize2(350, 100)
+	window.SetMinimumSize2(550, 125)
 	window.SetWindowTitle("ThreeFold network connector")
 
 	widget := widgets.NewQWidget(nil, 0)
@@ -301,6 +366,9 @@ func userInterface() {
 		if !connectionState {
 			go submain()
 
+			ipLabel.SetText("...")
+			subnetLabel.SetText("...")
+
 			connectionLabel.SetText("Connected")
 			connectionLabel.SetStyleSheet("QLabel {color: green;}")
 			connectButton.SetText("Disconnect")
@@ -318,6 +386,18 @@ func userInterface() {
 	gridLayout.AddWidget2(statusLabel, 0, 0, core.Qt__AlignLeft)
 	gridLayout.AddWidget2(connectionLabel, 0, 1, core.Qt__AlignCenter)
 	gridLayout.AddWidget2(connectButton, 0, 2, core.Qt__AlignRight)
+
+	ipLabelInfo := widgets.NewQLabel2("Ipv6: ", nil, 0)
+	subnetLabelInfo := widgets.NewQLabel2("Subnet: ", nil, 0)
+
+	ipLabel = widgets.NewQLabel2(IPAddress.String(), nil, 0)
+	subnetLabel = widgets.NewQLabel2(IPSubnet.String(), nil, 0)
+
+	gridLayout.AddWidget2(ipLabelInfo, 1, 0, core.Qt__AlignLeft)
+	gridLayout.AddWidget2(ipLabel, 1, 1, core.Qt__AlignCenter)
+
+	gridLayout.AddWidget2(subnetLabelInfo, 2, 0, core.Qt__AlignLeft)
+	gridLayout.AddWidget2(subnetLabel, 2, 1, core.Qt__AlignCenter)
 
 	groupBox.SetLayout(gridLayout)
 	widget.Layout().AddWidget(groupBox)
@@ -346,19 +426,17 @@ func submain() {
 	var cfg *config.NodeConfig
 	var err error
 
-	if !fileExists("./config/config.yml") {
+	if !fileExists("config.yml") {
 		fmt.Println("Config file doesnt exist ...")
 		cfg = config.GenerateConfig()
 		fmt.Println(cfg)
 
 		configFile := doGenconf(*confjson)
 		fmt.Println("Config file created")
-		//configFile = strings.ReplaceAll(configFile, "Peers: []", getConfigPeers())
-
-		fmt.Println(configPeers)
+		configFile = strings.ReplaceAll(configFile, "Peers: []", configPeers)
 		fmt.Println("Peers replaced")
 
-		f, err := os.Create("./config/config.yml")
+		f, err := os.Create("config.yml")
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -379,7 +457,7 @@ func submain() {
 
 	genconf := flag.Bool("genconf", false, "print a new config to stdout")
 	useconf := flag.Bool("useconf", false, "read HJSON/JSON config from stdin")
-	useconffile := flag.String("useconffile", "./config/config.yml", "read HJSON/JSON config from specified file path")
+	useconffile := flag.String("useconffile", "./config.yml", "read HJSON/JSON config from specified file path")
 	normaliseconf := flag.Bool("normaliseconf", false, "use in combination with either -useconf or -useconffile, outputs your configuration normalised")
 	autoconf := flag.Bool("autoconf", false, "automatic mode (dynamic IP, peer with IPv6 neighbors)")
 	ver := flag.Bool("version", false, "prints the version of this build")
@@ -529,10 +607,13 @@ func submain() {
 	}
 	// Make some nice output that tells us what our IPv6 address and subnet are.
 	// This is just logged to stdout for the user.
-	address := n.core.Address()
-	subnet := n.core.Subnet()
-	logger.Infof("Your IPv6 address is %s", address.String())
-	logger.Infof("Your IPv6 subnet is %s", subnet.String())
+	IPAddress = n.core.Address()
+	IPSubnet = n.core.Subnet()
+	logger.Infof("Your IPv6 address is %s", IPAddress.String())
+	logger.Infof("Your IPv6 subnet is %s", IPSubnet.String())
+
+	ipLabel.SetText(IPAddress.String())
+	subnetLabel.SetText(IPSubnet.String())
 
 	// Catch interrupts from the operating system to exit gracefully.
 	c := make(chan os.Signal, 1)
@@ -565,9 +646,12 @@ exit:
 
 // The main function is responsible for configuring and starting Yggdrasil.
 func main() {
-	configPeers = getConfigPeers()
-
-	userInterface()
+	if checkRoot() {
+		configPeers = <-getConfigPeers()
+		userInterface()
+	} else {
+		fmt.Println("Ending app ...")
+	}
 }
 
 func (n *node) shutdown() {
