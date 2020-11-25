@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,6 +53,8 @@ var IPSubnet net.IPNet
 var ipLabel *widgets.QLabel
 var subnetLabel *widgets.QLabel
 var debugLabel *widgets.QLabel
+var connectionLabel *widgets.QLabel
+var connectButton *widgets.QPushButton
 var n node
 var confjson *bool
 var genconf *bool
@@ -99,11 +103,13 @@ func checkRoot() bool {
 
 	fmt.Println("Asking user for password")
 
-	widgets.NewQApplication(len(os.Args), os.Args)
+	app := widgets.NewQApplication(len(os.Args), os.Args)
+	app.SetWindowIcon(gui.NewQIcon5(":/qml/icon.ico"))
+
 	var password = ""
 	var widget = widgets.NewQWidget(nil, 0)
 	var dialog = widgets.NewQInputDialog(widget, core.Qt__Dialog)
-	dialog.SetWindowTitle("Threefold Network Connector")
+	dialog.SetWindowTitle("ThreeFold Network Connector")
 	dialog.SetLabelText("ThreeFold Network Connector would like to automatically\nset up your connection to the ThreeFold Network.\n\nTo do this,  please provide the password for \"" + getUsername() + "\"")
 	dialog.SetTextEchoMode(widgets.QLineEdit__Password)
 	dialog.SetInputMethodHints(core.Qt__ImhNone)
@@ -115,20 +121,53 @@ func checkRoot() bool {
 
 	dialog.Exec()
 
+	fmt.Println("Cleaning up yggdrasil sock.")
+	cleanupYggdrasilSock(password)
+
 	fmt.Println("Restarting myself as a new elevated process")
 	elevateMyself(password)
-
+	// time.Sleep(3 * time.Second)
 	return false
 }
 
-func elevateMyself(password string) string {
-	cmd := "echo " + password + " | sudo -S /Users/mathiasdeweerdt/Documents/jimber/yggdrasil_desktop_client/go/deploy/darwin/go.app/Contents/MacOS/go"
+func cleanupYggdrasilSock(password string) string {
+	cmd := "echo " + password + " | sudo -S rm -rf /var/run/yggdrasil.sock"
+	// fmt.Println(cmd)
 	stdout, err := exec.Command("bash", "-c", cmd).Output()
 	if err != nil {
 		fmt.Println(err)
-		os.Exit(1)
+		// os.Exit(1)
 	}
 	return strings.TrimSpace(string(stdout))
+}
+
+func elevateMyself(password string) {
+	cmd := "echo " + password + " | sudo -S " + getExecutingDirectory() + "/ThreeFoldNetworkConnector"
+	// fmt.Println(cmd)
+	rcmd := exec.Command("bash", "-c", cmd)
+	err := rcmd.Start()
+
+	if err != nil {
+		fmt.Println(err)
+		// os.Exit(1)
+	}
+
+}
+
+func getExecutingDirectory() string {
+	// cmd := "pwd"
+	// stdout, err := exec.Command("bash", "-c", cmd).Output()
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	os.Exit(1)
+	// }
+	// return strings.TrimSpace(string(stdout))
+	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return dir
 }
 
 func getUsername() string {
@@ -136,7 +175,7 @@ func getUsername() string {
 	stdout, err := exec.Command("bash", "-c", cmd).Output()
 	if err != nil {
 		fmt.Println(err)
-		os.Exit(1)
+		// os.Exit(1)
 	}
 	return strings.TrimSpace(string(stdout))
 }
@@ -145,7 +184,7 @@ func getProcessOwner() string {
 	stdout, err := exec.Command("ps", "-o", "user=", "-p", strconv.Itoa(os.Getpid())).Output()
 	if err != nil {
 		fmt.Println(err)
-		os.Exit(1)
+		// os.Exit(1)
 	}
 	return strings.TrimSpace(string(stdout))
 }
@@ -161,6 +200,19 @@ func getConfigPeers() <-chan string {
 		var ipAddresses []YggdrasilIPAddress
 
 		c.OnHTML(".statusup #address", func(e *colly.HTMLElement) {
+
+			// Filtering out all tcp and ipv6 addresses
+
+			if strings.Contains(e.Text, "tcp://") {
+				return
+			}
+
+			if strings.Contains(e.Text, "[") && strings.Contains(e.Text, "]") {
+				return
+			}
+
+			// This also filters ipv6 incase we want it in the future.
+
 			result := strings.ReplaceAll(e.Text, "tls://", "")
 			result = strings.ReplaceAll(result, "tcp://", "")
 			result = strings.ReplaceAll(result, "[", "")
@@ -201,7 +253,7 @@ func pingAddress(addr YggdrasilIPAddress) {
 	pinger.Timeout = time.Second / 2
 
 	if err != nil {
-		panic(err)
+		//panic(err)
 	}
 	pinger.Count = 2
 	err = pinger.Run() // Blocks until finished.
@@ -234,7 +286,7 @@ func readConfig(useconf *bool, useconffile *string, normaliseconf *bool) *config
 		conf, err = ioutil.ReadAll(os.Stdin)
 	}
 	if err != nil {
-		panic(err)
+		//panic(err)
 	}
 	// If there's a byte order mark - which Windows 10 is now incredibly fond of
 	// throwing everywhere when it's converting things into UTF-16 for the hell
@@ -246,7 +298,7 @@ func readConfig(useconf *bool, useconffile *string, normaliseconf *bool) *config
 		decoder := utf.NewDecoder()
 		conf, err = decoder.Bytes(conf)
 		if err != nil {
-			panic(err)
+			//panic(err)
 		}
 	}
 	// Generate a new configuration - this gives us a set of sane defaults -
@@ -256,7 +308,7 @@ func readConfig(useconf *bool, useconffile *string, normaliseconf *bool) *config
 	cfg := config.GenerateConfig()
 	var dat map[string]interface{}
 	if err := hjson.Unmarshal(conf, &dat); err != nil {
-		panic(err)
+		//panic(err)
 	}
 	// Check for fields that have changed type recently, e.g. the Listen config
 	// option is now a []string rather than a string
@@ -284,13 +336,13 @@ func readConfig(useconf *bool, useconffile *string, normaliseconf *bool) *config
 	// Sanitise the config
 	confJson, err := json.Marshal(dat)
 	if err != nil {
-		panic(err)
+		// panic(err)
 	}
 	json.Unmarshal(confJson, &cfg)
 	// Overlay our newly mapped configuration onto the autoconf node config that
 	// we generated above.
 	if err = mapstructure.Decode(dat, &cfg); err != nil {
-		panic(err)
+		// panic(err)
 	}
 	return cfg
 }
@@ -307,7 +359,7 @@ func doGenconf(isjson bool) string {
 		bs, err = hjson.Marshal(cfg)
 	}
 	if err != nil {
-		panic(err)
+		// panic(err)
 	}
 	return string(bs)
 }
@@ -340,6 +392,7 @@ func setLogLevel(loglevel string, logger *log.Logger) {
 
 func userInterface() {
 	app := widgets.NewQApplication(len(os.Args), os.Args)
+	app.SetWindowIcon(gui.NewQIcon5(":/qml/icon.ico"))
 
 	window := widgets.NewQMainWindow(nil, 0)
 
@@ -361,9 +414,11 @@ func userInterface() {
 		window.Show()
 	})
 
-	yggdrasilVersionMenuAction := systrayMenu.AddAction("Yggdrasil version")
+	yggdrasilVersionMenuAction := systrayMenu.AddAction("Reset")
 	yggdrasilVersionMenuAction.ConnectTriggered(func(bool) {
-		widgets.QMessageBox_Information(nil, "ThreeFold network connector", "Ygdrassil version: "+version.BuildName(), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+		resetApplication()
+		widgets.QMessageBox_Information(nil, "ThreeFold network connector", "All the settings have been reset.\n The application will close itself. \n\n You can simply open it again.", widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+		os.Exit(0)
 	})
 
 	quitMenuAction := systrayMenu.AddAction("Quit")
@@ -382,10 +437,10 @@ func userInterface() {
 	gridLayout := widgets.NewQGridLayout2()
 
 	statusLabel := widgets.NewQLabel2("Connection status: ", nil, 0)
-	connectionLabel := widgets.NewQLabel2("Disconnected", nil, 0)
+	connectionLabel = widgets.NewQLabel2("Disconnected", nil, 0)
 	connectionLabel.SetStyleSheet("QLabel {color: red;}")
 
-	connectButton := widgets.NewQPushButton2("Connect", nil)
+	connectButton = widgets.NewQPushButton2("Connect", nil)
 
 	CopyIPButton := widgets.NewQPushButton2("Copy Ipv6", nil)
 	copySubnetButton := widgets.NewQPushButton2("Copy Subnet", nil)
@@ -399,23 +454,22 @@ func userInterface() {
 	})
 
 	connectButton.ConnectClicked(func(bool) {
-		if !connectionState {
-			go submain()
+		connectButton.SetDisabled(true)
 
+		if !connectionState {
+			connectButton.SetText("Disconnect")
 			ipLabel.SetText("...")
 			subnetLabel.SetText("...")
-			debugLabel.SetText("[info]: 5")
 
-			connectionLabel.SetText("Connected")
-			connectionLabel.SetStyleSheet("QLabel {color: green;}")
-			connectButton.SetText("Disconnect")
+			go submain()
 			connectionState = true
 			return
 		}
+		connectButton.SetText("Connect")
 
 		connectionLabel.SetText("Disconnected")
 		connectionLabel.SetStyleSheet("QLabel {color: red;}")
-		connectButton.SetText("Connect")
+
 		connectionState = false
 		// defer n.shutdown()
 		// go submain()
@@ -482,7 +536,67 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
+func generateConfigFile(cfg *config.NodeConfig) {
+	// if !fileExists("/etc/threefold_yggdrasil.conf") {
+	debugLabel.SetText("[info]: No config file")
+	fmt.Println("Config file doesnt exist ...")
+	cfg = config.GenerateConfig()
+	fmt.Println(cfg)
+
+	debugLabel.SetText("[info]: config generated")
+
+	configFile := doGenconf(*confjson)
+	fmt.Println("Config file created")
+	debugLabel.SetText("[info]: Created config file")
+	configFile = strings.ReplaceAll(configFile, "Peers: []", configPeers)
+	fmt.Println("Peers replaced")
+	debugLabel.SetText("[info]: Peers replaced")
+
+	f, err := os.Create("/etc/threefold_yggdrasil.conf")
+	if err != nil {
+		fmt.Println(err)
+		debugLabel.SetText("[err01]: " + err.Error())
+		return
+	}
+	l, err := f.WriteString(configFile)
+	if err != nil {
+		fmt.Println(err)
+		debugLabel.SetText("[err02]: " + err.Error())
+		f.Close()
+		return
+	}
+	debugLabel.SetText("[info]: Config written")
+	fmt.Println(l, "bytes written successfully")
+	err = f.Close()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	// }
+}
+
+func resetApplication() {
+	err := os.Remove("/var/run/yggdrasil.sock")
+
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	err = os.Remove("/etc/threefold_yggdrasil.conf")
+
+	if err != nil {
+		fmt.Println(err)
+	}
+}
+
 func submain() {
+
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("Recovering from panic in submain error is: %v \n", r)
+		}
+	}()
+
 	if confjson == nil {
 		confjson = flag.Bool("json", false, "print configuration from -genconf or -normaliseconf as JSON instead of HJSON")
 	}
@@ -493,42 +607,10 @@ func submain() {
 	debugLabel.SetText("[info]: submain")
 	fmt.Println("initt")
 
-	if !fileExists("/etc/yggdrasil.conf") {
-		debugLabel.SetText("[info]: No config file")
-		fmt.Println("Config file doesnt exist ...")
-		cfg = config.GenerateConfig()
-		fmt.Println(cfg)
-
-		debugLabel.SetText("[info]: config generated")
-
-		configFile := doGenconf(*confjson)
-		fmt.Println("Config file created")
-		debugLabel.SetText("[info]: Created config file")
-		configFile = strings.ReplaceAll(configFile, "Peers: []", configPeers)
-		fmt.Println("Peers replaced")
-		debugLabel.SetText("[info]: Peers replaced")
-
-		f, err := os.Create("/etc/yggdrasil.conf")
-		if err != nil {
-			fmt.Println(err)
-			debugLabel.SetText("[err01]: " + err.Error())
-			return
-		}
-		l, err := f.WriteString(configFile)
-		if err != nil {
-			fmt.Println(err)
-			debugLabel.SetText("[err02]: " + err.Error())
-			f.Close()
-			return
-		}
-		debugLabel.SetText("[info]: Config written")
-		fmt.Println(l, "bytes written successfully")
-		err = f.Close()
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
+	if !fileExists("/etc/threefold_yggdrasil.conf") {
+		generateConfigFile(cfg)
 	}
+
 	if genconf == nil {
 		genconf = flag.Bool("genconf", false, "print a new config to stdout")
 	}
@@ -536,7 +618,7 @@ func submain() {
 		useconf = flag.Bool("useconf", false, "read HJSON/JSON config from stdin")
 	}
 	if useconffile == nil {
-		useconffile = flag.String("useconffile", "/etc/yggdrasil.conf", "read HJSON/JSON config from specified file path")
+		useconffile = flag.String("useconffile", "/etc/threefold_yggdrasil.conf", "read HJSON/JSON config from specified file path")
 	}
 	if normaliseconf == nil {
 		normaliseconf = flag.Bool("normaliseconf", false, "use in combination with either -useconf or -useconffile, outputs your configuration normalised")
@@ -589,7 +671,7 @@ func submain() {
 				bs, err = hjson.Marshal(cfg)
 			}
 			if err != nil {
-				panic(err)
+				//panic(err)
 			}
 			fmt.Println(string(bs))
 			return
@@ -671,7 +753,7 @@ func submain() {
 	n.state, err = n.core.Start(cfg, logger)
 	if err != nil {
 		logger.Errorln("An error occurred during startup")
-		panic(err)
+		//panic(err)
 	}
 	// Register the session firewall gatekeeper function
 	n.core.SetSessionGatekeeper(n.sessionFirewall)
@@ -716,6 +798,12 @@ func submain() {
 	subnetLabel.SetText(IPSubnet.String())
 	debugLabel.SetText("[info]: Ip has been set")
 
+	connectionLabel.SetText("Connected")
+	connectionLabel.SetStyleSheet("QLabel {color: green;}")
+
+	time.Sleep(1 * time.Second)
+	connectButton.SetDisabled(false)
+
 	// 	// Catch interrupts from the operating system to exit gracefully.
 	// 	c := make(chan os.Signal, 1)
 	// 	r := make(chan os.Signal, 1)
@@ -749,6 +837,17 @@ func submain() {
 func main() {
 	if checkRoot() {
 		configPeers = <-getConfigPeers()
+
+		if fileExists("/etc/threefold_yggdrasil.conf") {
+			fmt.Println("Updating peers")
+			data, _ := ioutil.ReadFile("/etc/threefold_yggdrasil.conf")
+			dataAsString := string(data)
+
+			var re = regexp.MustCompile(`Peers: \["(.*)"\]`)
+			s := re.ReplaceAllString(dataAsString, configPeers)
+			ioutil.WriteFile("/etc/threefold_yggdrasil.conf", []byte(s), 0644)
+		}
+
 		userInterface()
 	} else {
 		fmt.Println("Ending app ...")
@@ -760,6 +859,9 @@ func (n *node) shutdown() {
 	n.multicast.Stop()
 	n.tuntap.Stop()
 	n.core.Stop()
+
+	time.Sleep(1 * time.Second)
+	connectButton.SetDisabled(false)
 }
 
 func (n *node) sessionFirewall(pubkey *crypto.BoxPubKey, initiator bool) bool {
