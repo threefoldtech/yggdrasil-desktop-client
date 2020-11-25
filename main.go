@@ -184,6 +184,7 @@ func getExecutingDirectory() string {
 	return dir
 }
 
+// TODO: Check to see if this works on linux
 func getUsername() string {
 	cmd := "id -F"
 	stdout, err := exec.Command("bash", "-c", cmd).Output()
