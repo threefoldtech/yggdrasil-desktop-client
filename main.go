@@ -77,7 +77,7 @@ var loglevel *string
 
 var wg sync.WaitGroup
 
-var debug = false
+var debug = true
 
 // YggdrasilIPAddress represents an yggdrasil IP address with additional information.
 type YggdrasilIPAddress struct {
